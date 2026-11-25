@@ -224,7 +224,10 @@ details summary{cursor:pointer;color:var(--muted);font-size:14px;min-height:32px
         <button class="primary" id="btnCleared">已拔鏢，換下一位</button>
       </div>
       <p class="note">分數判錯時，點上方那一鏢的分數，用鍵盤選正確的分數。拔鏢後會自動換人，偵測不到時再按「已拔鏢」。</p>
-      <label class="chk"><input type="checkbox" id="autoDetect" checked> 自動偵測飛鏢</label>
+      <div class="btns">
+        <label class="chk"><input type="checkbox" id="autoDetect" checked> 自動偵測飛鏢</label>
+        <label class="chk"><input type="checkbox" id="showDbg"> 顯示偵測過程</label>
+      </div>
       <div class="btns" id="demoBtns" hidden>
         <button id="btnThrow">模擬擲一鏢</button>
         <button id="btnPull">模擬拔鏢</button>
@@ -430,6 +433,8 @@ const demo={canvas:document.createElement("canvas"),base:null,darts:[],truth:"",
     for(const d of this.darts){
       // 飛鏢從靶面垂直往外伸（往玩家方向，z 為負），稍微下垂
       const P=t=>this.project(d.x+d.tx*t,d.y+d.ty*t,-115*t);
+      // 上方燈光造成的陰影：落在靶面、鏢尖下方
+      {const Q=t=>this.project(d.x+d.tx*t+8*t,d.y+d.ty*t+70*t,0);const[a,b2]=Q(0),[c,e]=Q(.8);g.strokeStyle="rgba(0,0,0,.35)";g.lineWidth=5;g.lineCap="round";g.beginPath();g.moveTo(a,b2);g.lineTo(c,e);g.stroke();}
       const seg=(t0,t1,w,col)=>{const[a,b]=P(t0),[c,e]=P(t1);g.strokeStyle=col;g.lineWidth=w;g.lineCap="round";g.beginPath();g.moveTo(a,b);g.lineTo(c,e);g.stroke();};
       seg(0,.2,2,"#707070");seg(.2,.5,6,"#2b2b2b");seg(.5,.78,3,"#ddd");
       const[fx,fy]=P(.74),[gx,gy]=P(1);const dx=gx-fx,dy=gy-fy,l=Math.hypot(dx,dy)||1,nx=-dy/l*11,ny=dx/l*11;
@@ -594,7 +599,10 @@ function runAuto(silent){
   if(!src.type||!src.ready())return;
   if(cal.manual)return;
   let res;try{res=auto.run();}catch(e){console.error(e);res={ok:false,msg:"自動校正失敗："+e.message};}
-  if(res.ok){cal.setH(res.H);cal.ok=true;const m=$("calMsg");m.className="calmsg ok";m.textContent="已找到鏢靶（吻合度 "+Math.round(res.q*100)+"%）。確認黃色格線對齊後按「完成」。";}
+  if(res.ok){cal.setH(res.H);cal.ok=true;const m=$("calMsg");
+    let cut=false;for(let a=0;a<360;a+=10){const[u,v]=applyH(res.H,...bpt(a,180));if(u<.01||u>.99||v<.01||v>.99)cut=true;}
+    if(cut){m.className="calmsg err";m.textContent="找到鏢靶了，但靶的邊緣超出畫面，靠邊的鏢會判不準。請把手機往後移，讓整個靶（含外圈數字）都在畫面內，再按「重新自動校正」。";}
+    else{m.className="calmsg ok";m.textContent="已找到鏢靶（吻合度 "+Math.round(res.q*100)+"%）。確認黃色格線對齊後按「完成」。";}}
   else{const m=$("calMsg");m.className="calmsg err";m.textContent=res.msg;if(!silent)toast(res.msg,3500);}
   return res;
 }
@@ -646,7 +654,7 @@ const det={canvas:document.createElement("canvas"),ctx:null,PH:360,mask:null,mas
     const[w,h]=src.size();this.PH=Math.max(60,Math.round(PW*h/w));this.canvas.width=PW;this.canvas.height=this.PH;
     this.ctx=this.canvas.getContext("2d",{willReadFrequently:true});
     const m=new Uint8Array(PW*this.PH),idx=[];
-    for(let y=0;y<this.PH;y++)for(let x=0;x<PW;x++){const[X,Y]=applyH(cal.H,(x+.5)/PW,(y+.5)/this.PH);if(Math.hypot(X,Y)<215){m[y*PW+x]=1;idx.push(y*PW+x);}}
+    for(let y=0;y<this.PH;y++)for(let x=0;x<PW;x++){const[X,Y]=applyH(cal.H,(x+.5)/PW,(y+.5)/this.PH);if(Math.hypot(X,Y)<200){m[y*PW+x]=1;idx.push(y*PW+x);}}
     this.mask=m;this.maskIdx=Int32Array.from(idx);this.ref=this.emptyRef=this.prev=null;
   },
   grab(){
@@ -672,12 +680,14 @@ const det={canvas:document.createElement("canvas"),ctx:null,PH:360,mask:null,mas
       const off=this.offset(cur,this.ref),d=this.count(cur,this.ref,off);
       if(d<minA){this.stable=0;if(d<minA/3&&still){const r=this.ref;for(let i=0;i<r.length;i++)r[i]=r[i]*.92+cur[i]*.08;}setStatus("等待飛鏢","ok");return;}
       if(!still){this.stable=0;setStatus("偵測到動作…","warn");return;}
-      if(++this.stable<2) return;
+      if(++this.stable<3) return;
       this.stable=0;
       if(d>maxA){setStatus("畫面變化太大（有人擋住或鏡頭移動？）","err");return;}
       const tip=this.findTip(cur,this.ref,off);
+      if(tip&&tip.noise){this.ref=cur;setStatus("忽略："+this.dbg.why,"warn");return;}
+      if(!tip){if(this.dbg&&this.dbg.why==="變化範圍太大")setStatus("有東西擋在靶前","warn");else this.ref=cur;return;}
       this.ref=cur;
-      if(tip){this.turnBlobs.push(this.blob);onDetected(tip);}
+      this.turnBlobs.push(this.blob);onDetected(tip);
     } else if(this.state==="clear"){
       setStatus("等待拔鏢…","warn");
       if(!still){this.clearTicks=0;return;}
@@ -691,7 +701,12 @@ const det={canvas:document.createElement("canvas"),ctx:null,PH:360,mask:null,mas
   },
   findTip(cur,ref,off){
     const W=PW,H=this.PH,n=W*H,bin=new Uint8Array(n),T=this.T,m=this.mask;
-    for(let i=0;i<n;i++) if(m[i]&&this.px(cur,ref,i,off)>T) bin[i]=1;
+    let total=0;
+    for(let i=0;i<n;i++){ if(!m[i]||this.px(cur,ref,i,off)<=T) continue;
+      // 陰影：三個顏色通道等比例變暗、色相不變，不是飛鏢本身
+      const k=i*3,sc=cur[k]+cur[k+1]+cur[k+2]+6,sr=ref[k]+ref[k+1]+ref[k+2]+6,lr=sc/sr;
+      if(lr>.45&&lr<.93){const dc=Math.abs((cur[k]+2)/sc-(ref[k]+2)/sr)+Math.abs((cur[k+1]+2)/sc-(ref[k+1]+2)/sr);if(dc<.05)continue;}
+      bin[i]=1;total++; }
     const dil=new Uint8Array(n);
     for(let y=1;y<H-1;y++)for(let x=1;x<W-1;x++){const i=y*W+x;if(bin[i]||bin[i-1]||bin[i+1]||bin[i-W]||bin[i+W]||bin[i-W-1]||bin[i-W+1]||bin[i+W-1]||bin[i+W+1])dil[i]=1;}
     const lab=new Int32Array(n);let best=null,L=0;const stack=[];
@@ -699,7 +714,11 @@ const det={canvas:document.createElement("canvas"),ctx:null,PH:360,mask:null,mas
       while(stack.length){const i=stack.pop();if(bin[i])px.push(i);const x=i%W,y=(i/W)|0;
         for(let dy=-1;dy<=1;dy++)for(let dx=-1;dx<=1;dx++){const xx=x+dx,yy=y+dy;if(xx<0||yy<0||xx>=W||yy>=H)continue;const j=yy*W+xx;if(dil[j]&&!lab[j]){lab[j]=L;stack.push(j);}}}
       if(!best||px.length>best.length)best=px;}
-    if(!best||best.length<8) return null;
+    this.blob=best;this.dbg={blob:best,tip:null,why:""};
+    if(!best||best.length<8){this.dbg.why="變化太小";return null;}
+    // 變化分散在很多地方（手機晃動、光線變化），不是一支飛鏢
+    if(best.length<total*.5&&total>40){this.dbg.why="畫面晃動或光線變化";return {noise:true};}
+    if(best.length>this.maskIdx.length*.08){this.dbg.why="變化範圍太大";return null;}
     // 鏢尖方向：飛鏢在畫面上往 dir 方向伸出，鏢尖在相反那一端
     const pos=$("camPos").value;let dir;
     if(pos==="auto"&&cal.cam){let mx=0,my=0;for(const i of best){mx+=i%W;my+=(i/W)|0;}mx/=best.length;my/=best.length;
@@ -708,8 +727,11 @@ const det={canvas:document.createElement("canvas"),ctx:null,PH:360,mask:null,mas
     const key=i=>-((i%W)*dir[0]+((i/W)|0)*dir[1]);
     let mxk=-1e9;for(const i of best)mxk=Math.max(mxk,key(i));
     let sx=0,sy=0,c=0;for(const i of best)if(key(i)>=mxk-1){sx+=i%W;sy+=(i/W)|0;c++;}
-    this.blob=best;
     const tx=sx/c+.5-dir[0]*.5,ty=sy/c+.5-dir[1]*.5;
+    this.dbg.tip=[tx/W,ty/H];
+    // 鏢尖在靶外：多半是靶邊、牆面或背景的變化，不當成飛鏢
+    const[bx,by]=applyH(cal.H,tx/W,ty/H);
+    if(Math.hypot(bx,by)>178){this.dbg.why="變化在靶外，已忽略";return {noise:true};}
     return [tx/W,ty/H];
   }
 };
@@ -837,6 +859,12 @@ function draw(){
     if(step==="cal"){g.font="bold "+Math.round(14*k)+"px sans-serif";g.textAlign="center";g.textBaseline="middle";for(let i=0;i<20;i++){const[x,y]=boardToDisp(...bpt(i*18,188));g.fillStyle="rgba(0,0,0,.6)";g.fillRect(x-11*k,y-9*k,22*k,18*k);g.fillStyle=i===0?"#ff5a4f":"rgba(255,230,90,.95)";g.fillText(ORDER[i],x,y);}}
   }
   if(step==="cal"&&cal.manual){const lab=["20","6","3","11"];cal.pts.forEach(([u,v],i)=>{const[x,y]=n2d(u,v);g.strokeStyle="#fff";g.lineWidth=2*k;g.beginPath();g.arc(x,y,9*k,0,7);g.stroke();g.fillStyle="#fff";g.font="bold "+Math.round(14*k)+"px sans-serif";g.fillText(lab[i],x+18*k,y-14*k);});}
+  if(step==="game"&&$("showDbg").checked&&det.dbg&&det.dbg.blob){ // 紫色：最近一次偵測到的變化；白色十字：判定的鏢尖
+    const b=det.dbg.blob,PWc=PW,PHc=det.PH;g.fillStyle="rgba(255,0,255,.7)";const sz=Math.max(1.5,fit.w/PWc);
+    for(let j=0;j<b.length;j+=1){const i=b[j];const[x,y]=n2d((i%PWc)/PWc,((i/PWc)|0)/PHc);g.fillRect(x,y,sz,sz);}
+    if(det.dbg.tip){const[x,y]=n2d(...det.dbg.tip);g.strokeStyle="#fff";g.lineWidth=2*k;g.beginPath();g.moveTo(x-12*k,y);g.lineTo(x+12*k,y);g.moveTo(x,y-12*k);g.lineTo(x,y+12*k);g.stroke();}
+    if(det.dbg.why){g.fillStyle="rgba(0,0,0,.7)";g.fillRect(8*k,8*k,260*k,26*k);g.fillStyle="#ff9bff";g.font=Math.round(14*k)+"px sans-serif";g.textAlign="left";g.textBaseline="middle";g.fillText("上次變化："+det.dbg.why,14*k,21*k);}
+  }
   if(step==="game"&&game.st&&cal.Hinv){
     shownDarts().forEach((d,i)=>{if(d.x>900||d.fixed)return;const[x,y]=boardToDisp(d.x,d.y);g.strokeStyle="#4dff9a";g.lineWidth=2.5*k;g.beginPath();g.arc(x,y,7*k,0,7);g.stroke();g.fillStyle="rgba(0,0,0,.65)";g.fillRect(x+9*k,y-22*k,48*k,18*k);g.fillStyle="#fff";g.font="bold "+Math.round(13*k)+"px sans-serif";g.textAlign="left";g.textBaseline="middle";g.fillText(d.label,x+12*k,y-13*k);});
   }
