@@ -79,6 +79,10 @@ header h1 span{color:var(--red)}
 .note{font-size:13px;color:var(--muted);border-left:3px solid var(--line);padding-left:10px;margin:0}
 .calmsg{font-size:16px;font-weight:700}
 .calmsg.ok{color:var(--green)} .calmsg.err{color:#ffb3ad}
+.setupck{list-style:none;margin:8px 0 0;padding:0;display:flex;flex-direction:column;gap:6px}
+.setupck li{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:7px 10px;font-size:14px}
+.setupck li b{margin-right:6px}
+.setupck li.ok b{color:var(--green)} .setupck li.warn{border-color:var(--warn)} .setupck li.warn b{color:var(--warn)}
 .log{max-height:160px;overflow:auto;font-size:13px;color:var(--muted);font-variant-numeric:tabular-nums}
 details summary{cursor:pointer;color:var(--muted);font-size:14px;min-height:32px}
 
@@ -187,6 +191,8 @@ details summary{cursor:pointer;color:var(--muted);font-size:14px;min-height:32px
       <h2>校正靶面</h2>
       <p class="note">把整個鏢靶放在畫面中央，紅綠色的雙倍圈要完整入鏡。網頁會自動找出靶的位置、大小和角度，斜拍也可以。</p>
       <div class="calmsg" id="calMsg">正在尋找鏢靶…</div>
+      <ul class="setupck" id="setupCheck" hidden></ul>
+      <div class="btns" id="zoomBox" hidden><span class="hint">鏡頭倍率</span><span class="btns" id="zoomBtns" style="margin:0"></span></div>
       <div class="btns">
         <button id="btnAuto">重新自動校正</button>
         <button class="primary" id="btnCalDone" disabled>完成，開始比賽</button>
@@ -223,7 +229,7 @@ details summary{cursor:pointer;color:var(--muted);font-size:14px;min-height:32px
         <button id="btnEndTurn">結束這回合</button>
         <button class="primary" id="btnCleared">已拔鏢，換下一位</button>
       </div>
-      <p class="note">分數判錯時，點上方那一鏢的分數，用鍵盤選正確的分數。拔鏢後會自動換人，偵測不到時再按「已拔鏢」。</p>
+      <p class="note">分數判錯時，點上方那一鏢的分數，用鍵盤選正確的分數。拔鏢後會自動換人，偵測不到時再按「已拔鏢」。還沒丟滿三鏢就開始拔鏢，會自動結束這回合；被前面的鏢擋住的鏢，拔掉前面那支後會自動補上。</p>
       <div class="btns">
         <label class="chk"><input type="checkbox" id="autoDetect" checked> 自動偵測飛鏢</label>
         <label class="chk"><input type="checkbox" id="showDbg"> 顯示偵測過程</label>
@@ -430,7 +436,9 @@ const demo={canvas:document.createElement("canvas"),base:null,darts:[],truth:"",
     if(!this.base)this.renderBase();
     const g=this.canvas.getContext("2d");this.canvas.width=this.W;this.canvas.height=this.H;
     g.putImageData(this.base,0,0);
-    for(const d of this.darts){
+    // 離鏡頭遠的鏢先畫，近的鏢會擋住後面的鏢（跟真的一樣）
+    const C=this.cam.C,dist=d=>Math.hypot(d.x-C[0],d.y-C[1],C[2]);
+    for(const d of this.darts.slice().sort((p,q)=>dist(q)-dist(p))){
       // 飛鏢從靶面垂直往外伸（往玩家方向，z 為負），稍微下垂
       const P=t=>this.project(d.x+d.tx*t,d.y+d.ty*t,-115*t);
       // 上方燈光造成的陰影：落在靶面、鏢尖下方
@@ -455,15 +463,46 @@ async function startSource(){
   if(t==="file"){ $("fileInput").click(); return; }
   if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){toast("這個瀏覽器不能開鏡頭。請用 https 網址開啟本頁，或改用示範模擬靶。",5000);return;}
   try{
-    const id=$("camSelect").value;
-    const c={audio:false,video:id?{deviceId:{exact:id},width:{ideal:1280},height:{ideal:720}}:{facingMode:{ideal:"environment"},width:{ideal:1280},height:{ideal:720}}};
-    const s=await navigator.mediaDevices.getUserMedia(c);
-    src.stream=s;video.srcObject=s;await video.play().catch(()=>{});
-    src.type="camera";src.el=video;await listCams();afterSource();
+    const saved=store.get("settings",{})||{};
+    const id=$("camSelect").value||(saved.camId&&!camPicked?saved.camId:"");
+    const mk=id=>({audio:false,video:id?{deviceId:{exact:id},width:{ideal:1280},height:{ideal:720}}:{facingMode:{ideal:"environment"},width:{ideal:1280},height:{ideal:720}}});
+    let c=mk(id),s;
+    try{s=await navigator.mediaDevices.getUserMedia(c);}catch(e){if(!id||e.name==="NotAllowedError")throw e;c=mk("");s=await navigator.mediaDevices.getUserMedia(c);} // 記住的鏡頭不在了就用預設
+    src.stream=s;src.constraints=c;video.srcObject=s;await video.play().catch(()=>{});
+    src.type="camera";src.el=video;await listCams(c.video.deviceId?c.video.deviceId.exact:"");
+    src.zoom=1;const z=saved.zoom||1;if(z!==1)await applyZoom(z,true);
+    setupZoomUI();saveSettings();afterSource();
   }catch(e){toast("沒辦法開鏡頭："+(e.name==="NotAllowedError"?"鏡頭權限被拒絕，請到瀏覽器設定允許。":e.message),5000);}
 }
-async function listCams(){try{const ds=(await navigator.mediaDevices.enumerateDevices()).filter(d=>d.kind==="videoinput");const sel=$("camSelect"),cur=sel.value;sel.innerHTML='<option value="">後鏡頭（預設）</option>';ds.forEach((d,i)=>{const o=document.createElement("option");o.value=d.deviceId;o.textContent=d.label||("鏡頭 "+(i+1));sel.appendChild(o);});sel.value=cur;}catch(e){}}
+let camPicked=false;$("camSelect").addEventListener("change",()=>{camPicked=true;saveSettings();});
+async function listCams(cur){try{const ds=(await navigator.mediaDevices.enumerateDevices()).filter(d=>d.kind==="videoinput");const sel=$("camSelect");sel.innerHTML='<option value="">後鏡頭（預設）</option>';ds.forEach((d,i)=>{const o=document.createElement("option");o.value=d.deviceId;o.textContent=d.label||("鏡頭 "+(i+1));sel.appendChild(o);});sel.value=cur||"";if(sel.value!==(cur||""))sel.value="";src.cams=ds;}catch(e){}}
+/* ---------- 鏡頭倍率（0.5x 超廣角）：手機離靶很近也能拍到整個靶 ---------- */
+const ULTRA=/ultra\s*wide|超廣角|超广角|0\.5/i,FRONTCAM=/front|前置|前鏡頭|user|facetime/i;
+function zoomCaps(){const tr=src.stream&&src.stream.getVideoTracks()[0];if(!tr||!tr.getCapabilities)return null;try{const c=tr.getCapabilities();return c.zoom&&c.zoom.max>c.zoom.min?c.zoom:null;}catch(e){return null;}}
+function ultraCam(){return(src.cams||[]).find(d=>ULTRA.test(d.label)&&!FRONTCAM.test(d.label));}
+function curCamId(){const tr=src.stream&&src.stream.getVideoTracks()[0];try{return tr&&tr.getSettings?tr.getSettings().deviceId:"";}catch(e){return"";}}
+async function applyZoom(z,silent){const zc=zoomCaps();if(!zc)return false;z=Math.max(zc.min,Math.min(zc.max,z));
+  try{await src.stream.getVideoTracks()[0].applyConstraints({advanced:[{zoom:z}]});}catch(e){return false;}
+  src.zoom=z;saveSettings();if(!silent){setupZoomUI();setTimeout(()=>afterSource(),500);}return true;}
+// 列出可用的倍率：瀏覽器支援變焦就用變焦；不支援時，若手機有獨立的超廣角鏡頭，就提供切換
+function zoomOptions(){const zc=zoomCaps(),out=[];
+  if(zc){for(const z of[zc.min<1?zc.min:null,1,2])if(z!=null&&z>=zc.min-1e-6&&z<=zc.max+1e-6&&!out.some(o=>Math.abs(o.z-z)<.05))out.push({z,label:(Math.round(z*10)/10)+"x",on:Math.abs((src.zoom||1)-z)<.05,go:()=>applyZoom(z)});return out;}
+  const u=ultraCam();if(!u)return out;const onU=curCamId()===u.deviceId;
+  out.push({z:.5,label:"0.5x 超廣角",on:onU,go:()=>{$("camSelect").value=u.deviceId;camPicked=true;saveSettings();startSource();}});
+  out.push({z:1,label:"1x 一般",on:!onU,go:()=>{$("camSelect").value="";camPicked=true;saveSettings();startSource();}});return out;}
+function setupZoomUI(){const box=$("zoomBtns"),opts=src.type==="camera"?zoomOptions():[];$("zoomBox").hidden=opts.length<2;box.innerHTML="";
+  for(const o of opts){const b=document.createElement("button");b.textContent=o.label;if(o.on)b.className="on";b.onclick=()=>{if(!o.on)o.go();};box.appendChild(b);}}
 $("fileInput").addEventListener("change",async e=>{const f=e.target.files[0];if(!f)return;video.srcObject=null;video.src=URL.createObjectURL(f);video.loop=true;await video.play().catch(()=>{});src.type="file";src.el=video;afterSource();});
+// 手機鎖螢幕或切到別的 App 回來後，鏡頭可能被關掉：手機沒動就沿用原本的校正，重新接上鏡頭
+document.addEventListener("visibilitychange",async()=>{
+  if(document.visibilityState!=="visible")return;
+  try{navigator.wakeLock&&navigator.wakeLock.request("screen").catch(()=>{});}catch(e){}
+  if(src.type!=="camera")return;
+  const tr=src.stream&&src.stream.getVideoTracks()[0];
+  if(tr&&tr.readyState==="live"){video.play().catch(()=>{});return;}
+  try{const s=await navigator.mediaDevices.getUserMedia(src.constraints);src.stream=s;video.srcObject=s;await video.play().catch(()=>{});
+    await applyZoom(src.zoom,true);det.prev=null;det.ref=null;toast("鏡頭已重新接上");}catch(e){toast("鏡頭沒辦法重新開啟，請到「設定」再按一次「開啟來源」",4000);}
+});
 function stopSource(){if(src.stream){src.stream.getTracks().forEach(t=>t.stop());src.stream=null;}src.type=null;src.el=null;}
 function afterSource(){
   $("demoBtns").hidden=src.type!=="demo";
@@ -601,11 +640,38 @@ function runAuto(silent){
   let res;try{res=auto.run();}catch(e){console.error(e);res={ok:false,msg:"自動校正失敗："+e.message};}
   if(res.ok){cal.setH(res.H);cal.ok=true;const m=$("calMsg");
     let cut=false;for(let a=0;a<360;a+=10){const[u,v]=applyH(res.H,...bpt(a,180));if(u<.01||u>.99||v<.01||v>.99)cut=true;}
-    if(cut){m.className="calmsg err";m.textContent="找到鏢靶了，但靶的邊緣超出畫面，靠邊的鏢會判不準。請把手機往後移，讓整個靶（含外圈數字）都在畫面內，再按「重新自動校正」。";}
-    else{m.className="calmsg ok";m.textContent="已找到鏢靶（吻合度 "+Math.round(res.q*100)+"%）。確認黃色格線對齊後按「完成」。";}}
-  else{const m=$("calMsg");m.className="calmsg err";m.textContent=res.msg;if(!silent)toast(res.msg,3500);}
+    const wide=zoomOptions().find(o=>o.z<1&&!o.on);
+    if(cut){m.className="calmsg err";m.textContent="找到鏢靶了，但靶的邊緣超出畫面，靠邊的鏢會判不準。"+(wide?"請按下方的「"+wide.label+"」，或把手機往後移":"請把手機往後移")+"，讓整個靶（含外圈數字）都在畫面內，再按「重新自動校正」。";}
+    else{m.className="calmsg ok";m.textContent="已找到鏢靶（吻合度 "+Math.round(res.q*100)+"%）。確認黃色格線對齊後按「完成」。";}
+    renderSetupCheck(res.H,cut);}
+  else{const m=$("calMsg");m.className="calmsg err";m.textContent=res.msg;if(!silent)toast(res.msg,3500);$("setupCheck").hidden=true;}
   return res;
 }
+// 架設檢查：由校正推算手機相對靶的位置，提示怎麼擺最準
+// 參考做法：鏡頭放在接近靶心的高度、從靶的側邊斜拍，鏡頭與靶面正前方約成 35～55 度
+function setupAdvice(Hn,cut){
+  const out=[];const cam=cal.cam;if(!cam||!cam.pose)return out;const{x,y,z}=cam.pose;
+  const d=Math.hypot(x,y,z),tilt=Math.acos(Math.min(1,z/d))/D2R,elev=Math.atan2(-y,Math.hypot(x,z))/D2R;
+  const h=Math.abs(x)>z*.18?(x<0?"左":"右"):"",v=Math.abs(y)>z*.18?(y<0?"上":"下"):"";
+  const where=!h&&!v?"正前方":!h?"前"+v+"方":h+(v||"前")+"方";
+  out.push({k:"info",t:"手機位置",m:"在靶的"+where+"，偏離正面約 "+Math.round(tilt)+" 度，離靶心約 "+Math.round(d/10)+" 公分（估計值）。"});
+  if(tilt<20)out.push({k:"warn",t:"角度",m:"鏡頭幾乎正對靶面，鏢身容易擋住鏢尖，前後重疊的鏢也看不到。建議把手機移到靶的左側或右側，偏離正面 35～55 度。"});
+  else if(tilt<32)out.push({k:"warn",t:"角度",m:"可以用，但再往側邊移一點（偏離正面 35～55 度）會更準。"});
+  else if(tilt<=62)out.push({k:"ok",t:"角度",m:"很好，這個斜度最容易看清楚鏢尖。"});
+  else out.push({k:"warn",t:"角度",m:"太斜了，靶的遠側會被壓扁，分界線不好判斷。請往正面移一點（偏離正面 35～55 度）。"});
+  if(elev>40)out.push({k:"warn",t:"高度",m:"手機比靶高很多、往下拍。建議放低到接近靶心的高度。"});
+  else if(elev<-40)out.push({k:"warn",t:"高度",m:"手機比靶低很多、往上拍。建議抬高到接近靶心的高度。"});
+  else out.push({k:"ok",t:"高度",m:"接近靶心高度，很好。"});
+  // 靶在畫面裡的大小
+  let x0=1,x1=0,y0=1,y1=0;for(let a=0;a<360;a+=10){const[u,v]=applyH(Hn,...bpt(a,R.dOut));x0=Math.min(x0,u);x1=Math.max(x1,u);y0=Math.min(y0,v);y1=Math.max(y1,v);}
+  const fill=Math.max(x1-x0,y1-y0);
+  if(cut){const w=zoomOptions().find(o=>o.z<1&&!o.on);out.push({k:"warn",t:"大小",m:"靶超出畫面了。"+(w?"按下方「"+w.label+"」或把手機往後移。":"把手機往後移一點。")});}
+  else if(fill<.4){const w=zoomOptions().find(o=>o.z>1&&!o.on);out.push({k:"warn",t:"大小",m:"靶在畫面裡太小，細的分區會判不準。"+(w?"按下方「"+w.label+"」或把手機靠近一點。":"把手機靠近一點。")});}
+  else out.push({k:"ok",t:"大小",m:"整個靶都在畫面內，大小剛好。"});
+  return out;
+}
+function renderSetupCheck(Hn,cut){const ul=$("setupCheck");ul.innerHTML="";const list=setupAdvice(Hn,cut);ul.hidden=!list.length;
+  for(const a of list){const li=document.createElement("li");li.className=a.k;const b=document.createElement("b");b.textContent=(a.k==="ok"?"✓ ":a.k==="warn"?"⚠ ":"")+a.t;li.append(b,document.createTextNode(a.m));ul.appendChild(li);}}
 // 校正頁面沒有找到靶時，每秒自動再試一次
 setInterval(()=>{if(step==="cal"&&!cal.ok&&!cal.manual&&src.type)runAuto(true);},1200);
 
@@ -619,16 +685,25 @@ const cal={pts:[],H:null,Hinv:null,ok:false,manual:false,cam:null,
 };
 // 由校正結果推算手機相對靶的位置，用來判斷飛鏢在畫面上往哪個方向伸出
 function camModel(Hn){
-  if(!src.type)return null;const[W,Hh]=src.size();const f=0.8*Math.max(W,Hh);
+  if(!src.type)return null;const[W,Hh]=src.size();const S=Math.max(W,Hh);
   const Hp=mul3([W,0,0,0,Hh,0,0,0,1],Hn);
+  // 由透視變形估計鏡頭焦距（正對靶時估不出來，就用一般手機的預設值）
+  const A=mul3([1,0,-W/2,0,1,-Hh/2,0,0,1],Hp);
+  const a1=[A[0],A[3],A[6]],a2=[A[1],A[4],A[7]];
+  let f=0.8*S;{const tilt=Math.hypot(a1[2],a2[2])*S/Math.hypot(a1[0],a1[1],a2[0],a2[1]);const c=[];
+    if(tilt>.12){const d1=a1[2]*a2[2],d2=a1[2]*a1[2]-a2[2]*a2[2];
+      if(Math.abs(d1)>1e-12)c.push(-(a1[0]*a2[0]+a1[1]*a2[1])/d1);
+      if(Math.abs(d2)>1e-12)c.push(-(a1[0]*a1[0]+a1[1]*a1[1]-a2[0]*a2[0]-a2[1]*a2[1])/d2);}
+    const ok=c.filter(v=>v>0).map(Math.sqrt).filter(v=>v>.4*S&&v<2.5*S);if(ok.length)f=ok.reduce((x,y)=>x+y,0)/ok.length;}
   const Ki=[1/f,0,-W/2/f,0,1/f,-Hh/2/f,0,0,1];const M=mul3(Ki,Hp);
   const h1=[M[0],M[3],M[6]],h2=[M[1],M[4],M[7]],h3=[M[2],M[5],M[8]];
   let lam=2/(Math.hypot(...h1)+Math.hypot(...h2));if(h3[2]*lam<0)lam=-lam;
   const r1=h1.map(v=>v*lam),r2=h2.map(v=>v*lam),t=h3.map(v=>v*lam);const r3=cross(r1,r2);
-  // 相機在靶座標中的位置 = -Rᵀt；只要知道它在靶面的哪一側
-  const Cz=-(r3[0]*t[0]+r3[1]*t[1]+r3[2]*t[2]);
-  const side=Cz>0?1:-1;
-  return{project(X,Y,Z){const z=Z*side;const p=[r1[0]*X+r2[0]*Y+r3[0]*z+t[0],r1[1]*X+r2[1]*Y+r3[1]*z+t[1],r1[2]*X+r2[2]*Y+r3[2]*z+t[2]];return[(f*p[0]/p[2]+W/2)/W,(f*p[1]/p[2]+Hh/2)/Hh];}};
+  // 相機在靶座標中的位置 = -Rᵀt（mm；x 往右、y 往下、z 為離開靶面的距離）
+  const dot=(a,b)=>a[0]*b[0]+a[1]*b[1]+a[2]*b[2];
+  const C=[-dot(r1,t),-dot(r2,t),-dot(r3,t)];
+  const side=C[2]>0?1:-1;
+  return{f,pose:{x:C[0],y:C[1],z:Math.abs(C[2])},project(X,Y,Z){const z=Z*side;const p=[r1[0]*X+r2[0]*Y+r3[0]*z+t[0],r1[1]*X+r2[1]*Y+r3[1]*z+t[1],r1[2]*X+r2[2]*Y+r3[2]*z+t[2]];return[(f*p[0]/p[2]+W/2)/W,(f*p[1]/p[2]+Hh/2)/Hh];}};
 }
 $("btnAuto").onclick=()=>{cal.manual=false;$("manualNote").hidden=true;cal.ok=false;$("calMsg").textContent="正在尋找鏢靶…";$("calMsg").className="calmsg";runAuto(false);};
 $("btnCalDone").onclick=()=>{store.set("cal."+src.type,cal.Hinv);if(!game.cfg)startGame();setStep("game");};
@@ -683,6 +758,9 @@ const det={canvas:document.createElement("canvas"),ctx:null,PH:360,mask:null,mas
       if(++this.stable<3) return;
       this.stable=0;
       if(d>maxA){setStatus("畫面變化太大（有人擋住或鏡頭移動？）","err");return;}
+      // 變化的地方恢復成空靶的樣子：是有人在拔鏢，不是新的一鏢
+      if(this.emptyRef&&game.st&&game.st.turn.length){const ch=[];const I=this.maskIdx;for(let k=0;k<I.length;k++)if(this.px(cur,this.ref,I[k],off)>this.T)ch.push(I[k]);
+        if(this.isRemoval(cur,ch)){const before=this.ref;this.ref=cur;onTakeout(before,cur);return;}}
       const tip=this.findTip(cur,this.ref,off);
       if(tip&&tip.noise){this.ref=cur;setStatus("忽略："+this.dbg.why,"warn");return;}
       if(!tip){if(this.dbg&&this.dbg.why==="變化範圍太大")setStatus("有東西擋在靶前","warn");else this.ref=cur;return;}
@@ -690,7 +768,9 @@ const det={canvas:document.createElement("canvas"),ctx:null,PH:360,mask:null,mas
       this.turnBlobs.push(this.blob);onDetected(tip);
     } else if(this.state==="clear"){
       setStatus("等待拔鏢…","warn");
-      if(!still){this.clearTicks=0;return;}
+      if(!still){this.clearTicks=0;this.clearStill=0;this.revealLock=false;return;}
+      // 拔掉前面的鏢後，原本被擋住的鏢露出來了：補算進上一回合
+      if(++this.clearStill>=3&&this.lastFull&&!this.revealLock&&(this.checkRevealed(cur)||this.pending))return;
       const off=this.offset(cur,this.emptyRef);
       // 判斷拔鏢：本回合每支鏢原本的位置都恢復成空靶的樣子
       let cleared;
@@ -699,7 +779,34 @@ const det={canvas:document.createElement("canvas"),ctx:null,PH:360,mask:null,mas
       if(cleared){if(++this.clearTicks>=3){this.clearTicks=0;onCleared(true);}}else this.clearTicks=0;
     }
   },
-  findTip(cur,ref,off){
+  isRemoval(cur,blob){if(!blob||!blob.length)return false;const off=this.offset(cur,this.emptyRef);let ok=0;for(const i of blob)if(this.px(cur,this.emptyRef,i,off)<=this.T*1.3)ok++;return ok>=blob.length*.7;},
+  // 找出「跟空靶不同、也跟拔鏢前不同」的區塊：拔掉前面的鏢後才露出來的鏢
+  // 回合提早結束後（還沒丟滿三鏢就開始拔），檢查靶上有沒有「不屬於已計分的鏢」的鏢：
+  // 通常是被前面的鏢擋住、拔掉前面那支才露出來的鏢
+  checkRevealed(cur){
+    if(!canAddMissed()){this.lastFull=null;return false;}
+    const W=PW,H=this.PH,E=this.emptyRef,oE=this.offset(cur,E),nM=this.maskIdx.length,minA=Math.max(12,nM*0.0012);
+    this.findTip(cur,E,oE,true);const comps=(this.comps||[]).filter(c=>c.length>=minA&&c.length<=nM*.08);
+    // 每個區塊的鏢尖；鏢尖跟已計分的鏢很接近的，就是那支鏢（還插在靶上）
+    const st=game.st,lp=st.P[(st.cur-1+st.P.length)%st.P.length];
+    const known=lp.lastTurn.darts.filter(d=>d.x<900);
+    const tips=comps.map(c=>{const t=this.tipOf(c);return t?{t,b:applyH(cal.H,...t)}:null;});
+    const near=(d,q)=>q&&Math.hypot(d.x-q.b[0],d.y-q.b[1])<15;
+    const present=known.filter(d=>tips.some(q=>near(d,q)));
+    // 鏢身、鏢翼被分成好幾塊時：落在還插著的鏢身上的區塊，也算是那支鏢
+    const onBody=c=>{if(!cal.cam)return false;let mx=0,my=0;for(const i of c){mx+=i%W;my+=(i/W)|0;}mx/=c.length;my/=c.length;
+      return present.some(d=>{const p0=cal.cam.project(d.x,d.y,0),p1=cal.cam.project(d.x,d.y,130);const ax=p0[0]*W,ay=p0[1]*H,vx=p1[0]*W-ax,vy=p1[1]*H-ay;
+        const t=Math.max(0,Math.min(1,((mx-ax)*vx+(my-ay)*vy)/(vx*vx+vy*vy||1)));return Math.hypot(mx-ax-t*vx,my-ay-t*vy)<12;});};
+    let cand=null;
+    comps.forEach((c,k)=>{const q=tips[k];if(!q||known.some(d=>near(d,q))||onBody(c))return;if(!cand||c.length>cand.blob.length)cand={tip:q.t,blob:c};});
+    if(!cand){this.pending=null;return false;}
+    // 連續兩次都在同一個位置看到，才補上（避免手或陰影造成誤判）
+    const P=this.pending;
+    if(P&&Math.hypot(P.tip[0]-cand.tip[0],P.tip[1]-cand.tip[1])<.02){if(++P.n>=2){this.pending=null;this.turnBlobs.push(cand.blob);this.revealLock=true;this.dbg={blob:cand.blob,tip:cand.tip,why:"補上被擋住的鏢"};addMissedDart(cand.tip);return true;}}
+    else this.pending={tip:cand.tip,n:1};
+    return false;
+  },
+  findTip(cur,ref,off,all){
     const W=PW,H=this.PH,n=W*H,bin=new Uint8Array(n),T=this.T,m=this.mask;
     let total=0;
     for(let i=0;i<n;i++){ if(!m[i]||this.px(cur,ref,i,off)<=T) continue;
@@ -709,16 +816,25 @@ const det={canvas:document.createElement("canvas"),ctx:null,PH:360,mask:null,mas
       bin[i]=1;total++; }
     const dil=new Uint8Array(n);
     for(let y=1;y<H-1;y++)for(let x=1;x<W-1;x++){const i=y*W+x;if(bin[i]||bin[i-1]||bin[i+1]||bin[i-W]||bin[i+W]||bin[i-W-1]||bin[i-W+1]||bin[i+W-1]||bin[i+W+1])dil[i]=1;}
-    const lab=new Int32Array(n);let best=null,L=0;const stack=[];
+    const lab=new Int32Array(n);let best=null,L=0;const stack=[];this.comps=all?[]:null;
     for(let s=0;s<n;s++){if(!dil[s]||lab[s])continue;L++;const px=[];stack.push(s);lab[s]=L;
       while(stack.length){const i=stack.pop();if(bin[i])px.push(i);const x=i%W,y=(i/W)|0;
         for(let dy=-1;dy<=1;dy++)for(let dx=-1;dx<=1;dx++){const xx=x+dx,yy=y+dy;if(xx<0||yy<0||xx>=W||yy>=H)continue;const j=yy*W+xx;if(dil[j]&&!lab[j]){lab[j]=L;stack.push(j);}}}
+      if(all&&px.length)this.comps.push(px);
       if(!best||px.length>best.length)best=px;}
+    if(all)return null;
     this.blob=best;this.dbg={blob:best,tip:null,why:""};
     if(!best||best.length<8){this.dbg.why="變化太小";return null;}
     // 變化分散在很多地方（手機晃動、光線變化），不是一支飛鏢
     if(best.length<total*.5&&total>40){this.dbg.why="畫面晃動或光線變化";return {noise:true};}
     if(best.length>this.maskIdx.length*.08){this.dbg.why="變化範圍太大";return null;}
+    const tip=this.tipOf(best);this.dbg.tip=tip;
+    if(!tip){this.dbg.why="變化在靶外，已忽略";return {noise:true};}
+    return tip;
+  },
+  // 由一個變化區塊找鏢尖（畫面正規化座標）；鏢尖在靶外時傳回 null
+  tipOf(best){
+    const W=PW,H=this.PH;
     // 鏢尖方向：飛鏢在畫面上往 dir 方向伸出，鏢尖在相反那一端
     const pos=$("camPos").value;let dir;
     if(pos==="auto"&&cal.cam){let mx=0,my=0;for(const i of best){mx+=i%W;my+=(i/W)|0;}mx/=best.length;my/=best.length;
@@ -728,10 +844,9 @@ const det={canvas:document.createElement("canvas"),ctx:null,PH:360,mask:null,mas
     let mxk=-1e9;for(const i of best)mxk=Math.max(mxk,key(i));
     let sx=0,sy=0,c=0;for(const i of best)if(key(i)>=mxk-1){sx+=i%W;sy+=(i/W)|0;c++;}
     const tx=sx/c+.5-dir[0]*.5,ty=sy/c+.5-dir[1]*.5;
-    this.dbg.tip=[tx/W,ty/H];
     // 鏢尖在靶外：多半是靶邊、牆面或背景的變化，不當成飛鏢
     const[bx,by]=applyH(cal.H,tx/W,ty/H);
-    if(Math.hypot(bx,by)>178){this.dbg.why="變化在靶外，已忽略";return {noise:true};}
+    if(Math.hypot(bx,by)>178)return null;
     return [tx/W,ty/H];
   }
 };
@@ -762,8 +877,29 @@ function afterChange(pIdx){
   else if(st.lastMsg==="GAME SHOT"){toast("🎯 "+st.P[st.winner].name+" 獲勝！",4000);say(st.P[st.winner].name+" 獲勝");}
   else if(st.finished){const w=st.winner>=0?st.P[st.winner].name+" 獲勝！":"平手！";toast("回合結束，"+w,4000);say(w);}
   else if(st.turnEnded&&pIdx!=null){const lt=st.P[pIdx].lastTurn;say(String(lt.total));}
-  if(st.turnEnded||st.finished){det.state="clear";det.clearTicks=0;}
+  if(st.turnEnded||st.finished){if(det.state!=="clear"){det.lastFull=det.ref;det.clearStill=0;det.pending=null;}det.state="clear";det.clearTicks=0;}
   renderScore();
+}
+// 回合還沒丟滿三鏢就開始拔鏢（通常是有一鏢被擋住沒偵測到）：自動結束這回合，等拔鏢時再補抓
+function onTakeout(before,cur){
+  const st=game.st;
+  if(!st||st.finished||!st.turn.length){setStatus("偵測到拔鏢","warn");return;}
+  const p=st.cur;game.events.push({t:"end",auto:true});recompute();log(st.P[p].name+"：開始拔鏢，結束這回合（"+game.st.P[p].lastTurn.darts.length+" 鏢）");
+  afterChange(p);det.lastFull=before;det.clearStill=3;det.pending=null;det.checkRevealed(cur);
+}
+// 上一回合是「沒丟滿三鏢就結束」的，才可能有沒算到的鏢
+function canAddMissed(){const st=game.st;if(!st||st.finished||!game.events.length)return false;
+  const last=game.events[game.events.length-1];if(last.t!=="end")return false;
+  const p=st.P[(st.cur-1+st.P.length)%st.P.length];return p.lastTurn&&p.lastTurn.darts.length<3&&p.lastTurn.flag!=="bust";}
+function addMissedDart([u,v]){
+  const[x,y]=applyH(cal.H,u,v);const s=scoreAt(x,y);const d={t:"dart",x,y,...s,auto:true,revealed:true};
+  const pIdx=(game.st.cur-1+game.st.P.length)%game.st.P.length;
+  const ev=game.events.slice(0,-1);ev.push(d);
+  // 補上後若剛好三鏢（或爆鏢、收鏢），回合會自己結束，就不再需要「結束回合」
+  const withEnd=ev.concat([game.events[game.events.length-1]]);
+  game.events=replay(game.cfg,ev).turnEnded?ev:withEnd;recompute();
+  log(game.st.P[pIdx].name+"：補上被擋住的一鏢 "+s.label);toast("補上被擋住的一鏢："+s.label+"（判錯可點上方格子修正）",3000);beep(s.val>0);
+  afterChange(pIdx);
 }
 function onCleared(auto){
   if(auto&&det.state!=="clear")return;
@@ -772,7 +908,13 @@ function onCleared(auto){
   if(game.st&&game.st.finished){toast("比賽結束，按「重新開局」再來一場");return;}
   if(game.st){toast("輪到 "+game.st.P[game.st.cur].name,1500);if(auto)say("換"+game.st.P[game.st.cur].name);}
 }
-function recompute(){game.st=replay(game.cfg,game.events);game.showingPrev=game.st.turnEnded||game.st.finished;renderScore();}
+function recompute(){game.st=replay(game.cfg,game.events);game.showingPrev=game.st.turnEnded||game.st.finished;renderScore();saveGame();}
+// 比賽進度存在手機裡：鎖螢幕、切換 App、重新整理都能接續
+function saveGame(){if(!game.cfg)return;store.set("game",game.st&&game.st.finished?null:{cfg:game.cfg,events:game.events,t:Date.now()});}
+function restoreGame(){const g=store.get("game",null);if(!g||!g.cfg||!Array.isArray(g.events)||!g.events.length||Date.now()-g.t>12*3600e3)return false;
+  try{game.cfg=g.cfg;game.events=g.events;game.st=replay(game.cfg,game.events);}catch(e){game.cfg=null;game.events=[];game.st=null;return false;}
+  if(game.st.finished){game.cfg=null;game.events=[];game.st=null;return false;}
+  game.showingPrev=false;det.state="off";$("log").innerHTML="";log("接續上次的比賽："+modeName(game.cfg));renderScore();return true;}
 $("btnMiss").onclick=()=>{if(!game.st||game.st.finished||det.state==="clear")return toast("請先拔鏢");addDart({x:999,y:999,seg:0,mult:0,val:0,label:"脫靶"});};
 $("btnInput").onclick=()=>{if(!game.st||game.st.finished||det.state==="clear")return toast("請先拔鏢");openPad(-1);};
 $("btnUndo").onclick=()=>{if(!game.events.length)return;const e=game.events.pop();recompute();log("復原："+(e.label||"結束回合"));
@@ -891,7 +1033,7 @@ function syncOpts(){const t=$("gameType").value,is01=/^\d+$/.test(t);$("opts01")
   const n=+$("nPlayers").value,box=$("names"),old=[...box.querySelectorAll("input")].map(i=>i.value);box.innerHTML="";
   for(let i=0;i<n;i++){const l=document.createElement("label");l.className="field";const s=document.createElement("span");s.textContent="玩家 "+(i+1);const inp=document.createElement("input");inp.type="text";inp.id="name"+i;inp.value=old[i]??(store.get("names",[])[i]||"玩家"+(i+1));inp.oninput=saveSettings;l.append(s,inp);box.appendChild(l);}
   $("camPick").hidden=$("srcType").value!=="camera";$("demoAngleField").hidden=$("srcType").value!=="demo";}
-function saveSettings(){store.set("settings",{srcType:$("srcType").value,camPos:$("camPos").value,gameType:$("gameType").value,nPlayers:$("nPlayers").value,doubleOut:$("doubleOut").checked,doubleIn:$("doubleIn").checked,speak:$("speak").checked});
+function saveSettings(){const prev=store.get("settings",{})||{};store.set("settings",{camId:camPicked||src.type==="camera"?$("camSelect").value:prev.camId,zoom:src.type==="camera"?(src.zoom||1):(prev.zoom||1),srcType:$("srcType").value,camPos:$("camPos").value,gameType:$("gameType").value,nPlayers:$("nPlayers").value,doubleOut:$("doubleOut").checked,doubleIn:$("doubleIn").checked,speak:$("speak").checked});
   store.set("names",[...$("names").querySelectorAll("input")].map(i=>i.value));}
 (function loadSettings(){const s=store.get("settings",null);if(s){for(const k of["srcType","camPos","gameType","nPlayers"])if(s[k])$(k).value=s[k];for(const k of["doubleOut","doubleIn","speak"])if(k in s)$(k).checked=s[k];}
   if(!window.isSecureContext&&location.protocol!=="file:"){$("srcType").value="demo";}})();
@@ -899,6 +1041,7 @@ for(const id of["srcType","camPos","gameType","nPlayers","doubleOut","doubleIn",
 $("rounds").addEventListener("change",()=>{if(game.cfg&&!game.events.length)startGame();});
 $("autoDetect").addEventListener("change",()=>{det.lastStatus="";renderStatus("","");if($("autoDetect").checked)det.arm(true);});
 syncOpts();
+if(restoreGame())toast("已接續上次沒打完的比賽。要重來請按「重新開局」。",4000);
 if("serviceWorker" in navigator&&window.isSecureContext&&location.protocol!=="file:"&&location.hostname!=="localhost"){navigator.serviceWorker.register("sw.js").catch(()=>{});}
 window.__dart={scoreAt,replay,checkout,demo,det,game,cal,auto,runAuto,fitH,applyH,invH};
 </script>
